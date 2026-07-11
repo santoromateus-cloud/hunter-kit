@@ -8,7 +8,7 @@
 
 ## Parâmetros (preencher por cliente)
 
-Os valores reais de cada cliente vivem FORA deste repo (arquivo `PARAMETROS-<cliente>.md` na pasta do projeto, no workspace).
+Os valores reais de cada cliente vivem FORA deste repo (arquivo `PARAMETROS-<cliente>.md` na pasta do projeto).
 
 | Parâmetro | Exemplo genérico |
 |---|---|
@@ -17,26 +17,25 @@ Os valores reais de cada cliente vivem FORA deste repo (arquivo `PARAMETROS-<cli
 | `ZONE` | southamerica-east1-a |
 | `IP_VM` | IP externo estático da VM |
 | `DOMINIO_API` | api.meudominio.com.br |
-| `PAINEL_DNS` | onde a zona DNS do domínio vive (Registro.br, Cloudflare, Vercel...) |
-| `APP_META` | app Meta do cliente (developers.facebook.com) |
+| `PAINEL_DNS` | onde a zona DNS vive (Registro.br, Cloudflare, Vercel...) |
+| `APP_META` | app Meta do cliente |
 
-**Pré-requisitos (fase "prédio", já de pé antes desta):** VM com hunter-web (porta 8080) + hunter-worker em systemd; WhatsApp Cloud API com número REGISTRADO (POST /register com PIN — sem isso, erro #133010); template de abertura APROVADO; `.env` do app com `META_APP_SECRET=placeholder`.
+**Pré-requisitos (fase "prédio"):** VM com hunter-web (8080) + hunter-worker em systemd; WhatsApp Cloud API com número REGISTRADO (POST /register com PIN — sem isso, erro #133010); template de abertura APROVADO; `.env` com `META_APP_SECRET=placeholder`.
 
 ---
 
 ## Passo 0 — Checagem de saúde (30s)
 
-No Cloud Shell:
 ```bash
 gcloud compute ssh <VM> --zone=<ZONE> --command="curl -s localhost:8080/health; echo; sudo journalctl -u hunter-worker -n 15 --no-pager"
 ```
-Esperado: `"ok":true,"pausado":false` e log do worker sem erros novos.
+Esperado: `"ok":true,"pausado":false`.
 
 ## Passo 1 — DNS (painel, ~2 min + propagação)
 
-No painel onde a zona DNS do domínio vive (`PAINEL_DNS`):
-- **Registro.br:** login → Meus Domínios → domínio → aba **DNS** → Editar zona (modo avançado) → **nova entrada tipo A**: nome `api` → valor `IP_VM` → salvar. A publicação no Registro.br pode levar de minutos a ~1h (o painel avisa o horário da próxima publicação).
-- Conferir propagação: `dig +short DOMINIO_API` (repetir até devolver o IP).
+No painel da zona DNS (`PAINEL_DNS`):
+- **Registro.br:** login → Meus Domínios → domínio → **DNS** → Editar zona → **nova entrada A**: nome `api` → valor `IP_VM` → salvar.
+- Conferir: `dig +short DOMINIO_API` (repetir até devolver o IP).
 
 ## Passo 2 — Firewall (Cloud Shell, 1 linha)
 
@@ -44,44 +43,55 @@ No painel onde a zona DNS do domínio vive (`PAINEL_DNS`):
 curl -fsSL https://raw.githubusercontent.com/santoromateus-cloud/hunter-kit/main/gcp-firewall.sh | bash -s -- <GCP_PROJECT> <VM> <ZONE>
 ```
 
-## Passo 3 — HTTPS + rotação de tokens (Cloud Shell, 1 linha)
+## Passo 3 — HTTPS + tokens + inscrição do WABA (Cloud Shell, 1 linha)
 
 ```bash
 gcloud compute ssh <VM> --zone=<ZONE> --command="curl -fsSL https://raw.githubusercontent.com/santoromateus-cloud/hunter-kit/main/vm-orelha.sh | bash -s -- <DOMINIO_API>"
 ```
-O script instala o Caddy (certificado Let's Encrypt automático), aponta `DOMINIO_API → localhost:8080`, gera **META_VERIFY_TOKEN e SIM_TOKEN novos** e imprime o verify token (o único que pode aparecer na tela — é de baixa sensibilidade).
+Instala Caddy (cert Let's Encrypt automático), aponta `DOMINIO_API → localhost:8080`, gera **META_VERIFY_TOKEN e SIM_TOKEN**, **inscreve o WABA (Passo 5.5, automatico)** e imprime o verify token.
 
-Validar: `curl -s https://DOMINIO_API/health` devolve o mesmo JSON do health local.
+Validar: `curl -s https://DOMINIO_API/health`.
 
 ## Passo 4 — META_APP_SECRET real (interativo, NUNCA pelo chat)
 
-1. developers.facebook.com → app do cliente → **Configurações do app → Básico → Chave Secreta do App → Mostrar → copiar** (vai pro clipboard).
-2. Sessão SSH interativa na VM:
+1. developers.facebook.com → app → **Configurações → Básico → Chave Secreta do App → Mostrar → copiar**.
+2. SSH interativo na VM:
 ```bash
-cd ~/v2-fundacao && read -s S && sed -i "s|^META_APP_SECRET=.*|META_APP_SECRET=$S|" .env && unset S && sudo systemctl restart hunter-web && echo "secret ok"
+cd ~/v2-fundacao && read -rs S && sed -i "s|^META_APP_SECRET=.*|META_APP_SECRET=$S|" .env && unset S && sudo systemctl restart hunter-web && echo "secret ok"
 ```
-Colar (Cmd+V) no `read -s` — não aparece nada na tela, é normal. **Padrão da casa: segredo vai do painel direto pro .env via clipboard; nunca passa pelo chat.**
+Colar (Cmd+V) no `read -rs` — tela não mostra nada, é normal. **Conferir: 32 hex; se colar 2x vira 64, cortar pela metade.**
 
-⚠️ Ordem importa: o secret real entra ANTES de configurar o webhook no painel — sem ele, todo POST da Meta leva 401 (assinatura inválida).
+⚠️ O secret entra ANTES do webhook — sem ele, POST da Meta leva 401.
 
 ## Passo 5 — Webhook no painel Meta (~3 min)
 
-App do cliente → **WhatsApp → Configuração** → Webhook → Editar:
+App → **WhatsApp → Configuração** → Webhook → Editar:
 - Callback URL: `https://DOMINIO_API/webhook/meta`
-- Verify token: o `META_VERIFY_TOKEN_NOVO` impresso no Passo 3
-- **Verificar e salvar** (a Meta faz um GET na hora; o app responde o hub.challenge)
-- Em **Campos do webhook** → assinar **`messages`**
+- Verify token: o `META_VERIFY_TOKEN_NOVO` do Passo 3
+- **Verificar e salvar** → depois assinar o campo **`messages`**
 
-Aproveitar o painel: conferir status dos templates (ex.: follow-up de 48h) no WhatsApp Manager.
+## Passo 5.5 — Inscrever o WABA no app (O ELO QUE FALTA — não pule)
 
-## Passo 6 — Teste de ouro da orelha
+⚠️ **O passo mais fácil de esquecer e o mais difícil de diagnosticar.** O webhook no app (Passo 5) NÃO basta: o WABA precisa estar inscrito no app. Sem isso: handshake verifica (GET 200), `messages` assinado, mas **nenhuma mensagem inbound chega** — idêntico a "dev mode", diagnóstico errado.
 
-1. Responder qualquer coisa, do celular do dono, na conversa do template já recebido.
+O `vm-orelha.sh` já faz automaticamente. Conferir/fazer manual, na VM (`.env` carregado):
+
+```bash
+# conferir (data:[] = NAO inscrito):
+curl -s "https://graph.facebook.com/v22.0/<WABA_ID>/subscribed_apps" -H "Authorization: Bearer $WA_TOKEN"
+# inscrever:
+curl -s -X POST "https://graph.facebook.com/v22.0/<WABA_ID>/subscribed_apps" -H "Authorization: Bearer $WA_TOKEN"
+# → {"success":true}; reconferir deve listar o app
+```
+
+## Passo 6 — Teste de ouro
+
+1. Responder algo, do celular do dono, na conversa do template.
 2. Conferir (Cloud Shell):
 ```bash
 gcloud compute ssh <VM> --zone=<ZONE> --command='cd ~/v2-fundacao && set -a && . ./.env && set +a && curl -s -H "X-Auth-Token: $SIM_TOKEN" localhost:8080/fila; echo; sudo journalctl -u hunter-web -n 20 --no-pager'
 ```
-**Sucesso =** a mensagem aparece na `/fila`, o log mostra POST `/webhook/meta` com 200, e o lead no Close ganha a nota "💬 Respondeu no WhatsApp".
+**Sucesso =** mensagem na `/fila` + log com POST `/webhook/meta` 200.
 
 ---
 
@@ -89,27 +99,26 @@ gcloud compute ssh <VM> --zone=<ZONE> --command='cd ~/v2-fundacao && set -a && .
 
 | Sintoma | Causa | Fix |
 |---|---|---|
-| Webhook "não foi possível validar" no painel | DNS ainda não propagou / porta fechada / verify token errado | Passo 1→2→3 na ordem; conferir `curl https://DOMINIO_API/health` antes do painel |
-| POST da Meta leva 401 | `META_APP_SECRET` ainda é placeholder | Passo 4 antes do Passo 5 |
-| Envio falha #133010 | Número não registrado na Cloud API (verificar por SMS não basta) | POST /register com PIN (fase prédio) |
-| Robô ignora lead recém-criado | Data de corte em UTC vs lead em BRT | Datas de corte sempre pensadas em BRT vs UTC |
-| Busca no Close devolve 0 com lead existente | Índice de busca atrasa minutos | Usar a MESMA query do worker e aguardar |
-| Cert não emite | Caddy subiu antes do DNS propagar | Normal — o Caddy re-tenta sozinho; só aguardar |
+| **Webhook verifica mas NENHUMA msg chega** (fila 0, sem POST) | **WABA não inscrito** (`subscribed_apps`=`[]`) — parece dev mode | **Passo 5.5**: POST subscribed_apps |
+| `/fila` ou webhook 500 `SQLite objects created in a thread` | conexão SQLite reusada entre threads do Flask | `sqlite3.connect(..., check_same_thread=False)` |
+| Webhook "não validou" no painel | DNS não propagou / porta fechada / verify errado | Passo 1→2→3; `curl https://DOMINIO_API/health` antes |
+| POST da Meta 401 | `META_APP_SECRET` placeholder ou colado 2x | Passo 4 antes do 5; comprimento = 32 |
+| Envio #133010 | Número não registrado (SMS não basta) | POST /register com PIN |
+| Robô ignora lead novo | Data de corte UTC vs BRT | Corte sempre em BRT |
+| Cert não emite | Caddy subiu antes do DNS | Normal — re-tenta sozinho |
 
 ## Botões de pânico
 
 ```bash
-# para tudo (dentro da VM):
 sudo systemctl stop hunter-worker hunter-web
-# pausa de software: config do cliente → "pausado": true → restart hunter-worker
+# pausa de software: config → "pausado": true → restart hunter-worker
 ```
 
-## Checklist final (binário)
+## Checklist final
 
-- [ ] `https://DOMINIO_API/health` responde ok
-- [ ] Webhook verificado e salvo no painel + campo `messages` assinado
-- [ ] `META_APP_SECRET` real no .env (nunca passou pelo chat)
-- [ ] Tokens rotacionados (verify + sim)
-- [ ] Teste de ouro: resposta do celular caiu na `/fila` + nota no Close
-- [ ] Template de follow-up conferido (aprovado ou em revisão)
-
+- [ ] `https://DOMINIO_API/health` ok
+- [ ] Webhook verificado + `messages` assinado
+- [ ] **WABA inscrito (`subscribed_apps` lista o app)**
+- [ ] `META_APP_SECRET` 32 hex (nunca pelo chat)
+- [ ] Tokens rotacionados
+- [ ] Teste de ouro: POST 200 + item na `/fila`
